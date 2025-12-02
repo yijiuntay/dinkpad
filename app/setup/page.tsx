@@ -1,10 +1,19 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function SetupPage() {
   const [courtCount, setCourtCount] = useState(4);
   const [playerInput, setPlayerInput] = useState('');
+  const router = useRouter();
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    localStorage.setItem('dinkpad_setup', JSON.stringify({ courtCount, playerInput }));
+    localStorage.removeItem('dinkpad_active_session'); // Clear any previous session
+    router.push('/session');
+  };
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -22,7 +31,7 @@ export default function SetupPage() {
               Configure your pickleball session
             </p>
 
-            <form className="space-y-6" onSubmit={(e) => e.preventDefault()}>
+            <form className="space-y-6" onSubmit={handleSubmit}>
               <div className="space-y-2">
                 <label 
                   htmlFor="courtCount" 
