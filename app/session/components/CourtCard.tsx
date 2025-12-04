@@ -9,9 +9,10 @@ interface CourtCardProps {
   queueLength: number;
   onFinishGame: (gameId: string) => void;
   onStartGame: (courtNum: number) => void;
+  onRemove: (courtNum: number) => void;
 }
 
-export function CourtCard({ courtNum, game, queueLength, onFinishGame, onStartGame }: CourtCardProps) {
+export function CourtCard({ courtNum, game, queueLength, onFinishGame, onStartGame, onRemove }: CourtCardProps) {
   return (
     <div 
       className={`relative overflow-hidden rounded-2xl border transition-all duration-300 ${
@@ -22,10 +23,21 @@ export function CourtCard({ courtNum, game, queueLength, onFinishGame, onStartGa
     >
       <div className="p-5">
         <div className="flex justify-between items-start mb-4">
-          <div className="px-3 py-1 rounded-full bg-slate-800/50 border border-white/5 text-xs font-medium text-slate-400">
-            Court {courtNum}
+          <div className="flex items-center gap-2">
+            <div className="px-3 py-1 rounded-full bg-slate-800/50 border border-white/5 text-xs font-medium text-slate-400">
+              Court {courtNum}
+            </div>
           </div>
-          {game && <GameTimer startTime={game.startTime} />}
+          <div className="flex items-center gap-2">
+            {game && <GameTimer startTime={game.startTime} />}
+            <button
+              onClick={() => onRemove(courtNum)}
+              className="p-2 rounded-full bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors"
+              title="Remove Court"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+            </button>
+          </div>
         </div>
 
         {game ? (

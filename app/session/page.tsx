@@ -17,62 +17,31 @@ export default function SessionPage() {
   const [isAddingPlayer, setIsAddingPlayer] = useState(false);
 
   useEffect(() => {
-    const setupData = localStorage.getItem('dinkpad_setup');
     const activeSessionData = localStorage.getItem('dinkpad_active_session');
 
-    if (!setupData) {
-      router.push('/setup');
-      return;
-    }
-
-    try {
-      const { courtCount, playerInput } = JSON.parse(setupData);
-      setTotalCourts(courtCount);
-
-      // If we have an active session, load it
-      if (activeSessionData) {
-        const { courts: savedCourts, queue: savedQueue, pastGames: savedPastGames } = JSON.parse(activeSessionData);
-        setCourts(savedCourts);
-        setQueue(savedQueue);
-        setPastGames(savedPastGames || []);
+    if (activeSessionData) {
+      try {
+        const parsed = JSON.parse(activeSessionData);
+        setCourts(parsed.courts || []);
+        setQueue(parsed.queue || []);
+        setPastGames(parsed.pastGames || []);
+        setTotalCourts(parsed.totalCourts || 0);
         setLoading(false);
-        return;
+      } catch (e) {
+        console.error("Failed to parse active session", e);
+        setLoading(false);
       }
-      
-      // Otherwise initialize new session
-      const allPlayers: Player[] = playerInput
-        .split('\n')
-        .filter((line: string) => line.trim())
-        .map((line: string, index: number) => {
-          const parts = line.trim().split(' ');
-          const lastPart = parts[parts.length - 1];
-          const rating = parseFloat(lastPart);
-          const hasRating = !isNaN(rating);
-          const name = hasRating ? parts.slice(0, -1).join(' ') : line.trim();
-          
-          return {
-            id: `p-${index}`,
-            name,
-            rating: hasRating ? rating : 0
-          };
-        });
-
-      setCourts([]);
-      setQueue(allPlayers);
-      setPastGames([]);
+    } else {
       setLoading(false);
-    } catch (e) {
-      console.error("Failed to parse setup data", e);
-      router.push('/setup');
     }
-  }, [router]);
+  }, []);
 
   // Persist state whenever it changes
   useEffect(() => {
     if (!loading) {
-      localStorage.setItem('dinkpad_active_session', JSON.stringify({ courts, queue, pastGames }));
+      localStorage.setItem('dinkpad_active_session', JSON.stringify({ courts, queue, pastGames, totalCourts }));
     }
-  }, [courts, queue, pastGames, loading]);
+  }, [courts, queue, pastGames, loading, totalCourts]);
 
   const findBestMatch = (candidates: Player[], history: PastGame[]) => {
     // Helper to generate combinations of 4 players
@@ -194,7 +163,43 @@ export default function SessionPage() {
     };
 
     setQueue([...queue, newPlayer]);
-    setIsAddingPlayer(false);
+  };
+
+  const removeCourt = (courtNum: number) => {
+    const gameOnCourt = courts.find(g => g.courtNumber === courtNum);
+    
+    if (gameOnCourt) {
+      if (!confirm(`There is an active game on Court ${courtNum}. Removing the court will cancel the game and return players to the queue. Continue?`)) {
+        return;
+      }
+      
+      // Return players to the front of the queue since the game was cancelled
+      setQueue(prev => [...gameOnCourt.players, ...prev]);
+
+      // Remove the game on this court
+      setCourts(prev => {
+        const remaining = prev.filter(g => g.courtNumber !== courtNum);
+        // Shift games on higher courts down
+        return remaining.map(g => {
+          if (g.courtNumber > courtNum) {
+            return { ...g, courtNumber: g.courtNumber - 1, id: g.id.replace(/-(\d+)$/, `-${g.courtNumber - 1}`) };
+          }
+          return g;
+        });
+      });
+    } else {
+      // Just shift games on higher courts down
+      setCourts(prev => {
+        return prev.map(g => {
+          if (g.courtNumber > courtNum) {
+            return { ...g, courtNumber: g.courtNumber - 1, id: g.id.replace(/-(\d+)$/, `-${g.courtNumber - 1}`) };
+          }
+          return g;
+        });
+      });
+    }
+
+    setTotalCourts(prev => prev - 1);
   };
 
   if (loading) {
@@ -225,7 +230,7 @@ export default function SessionPage() {
           onClick={() => {
             if (confirm('Are you sure you want to end the session? All progress will be lost.')) {
               localStorage.removeItem('dinkpad_active_session');
-              router.push('/setup');
+              router.push('/');
             }
           }}
           className="px-4 py-2 bg-slate-800/50 hover:bg-slate-700/50 border border-white/10 backdrop-blur-md rounded-lg text-sm transition-all hover:border-primary/30"
@@ -237,10 +242,20 @@ export default function SessionPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 relative z-10">
         {/* Active Games Section */}
         <div className="lg:col-span-2 space-y-6">
-          <h2 className="text-xl font-semibold flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_10px_rgba(34,197,94,0.5)]"/>
-            Active Courts
-          </h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_10px_rgba(34,197,94,0.5)]"/>
+              Active Courts
+            </h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setTotalCourts(prev => prev + 1)}
+                className="px-3 py-1 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg text-sm font-medium transition-colors"
+              >
+                + Add Court
+              </button>
+            </div>
+          </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Array.from({ length: totalCourts }).map((_, i) => {
@@ -255,6 +270,7 @@ export default function SessionPage() {
                   queueLength={queue.length}
                   onFinishGame={finishGame}
                   onStartGame={startGame}
+                  onRemove={removeCourt}
                 />
               );
             })}
@@ -289,6 +305,9 @@ export default function SessionPage() {
           <QueueList 
             queue={queue}
             onRemovePlayer={removePlayer}
+            onUpdateRating={(playerId, newRating) => {
+              setQueue(queue.map(p => p.id === playerId ? { ...p, rating: Math.max(0, Math.min(10, newRating)) } : p));
+            }}
           />
         </div>
       </div>
