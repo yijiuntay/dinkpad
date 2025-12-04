@@ -25,7 +25,7 @@ export default function Home() {
           </p>
           
           <Link 
-            href="/setup"
+            href="/session"
             className="group relative inline-flex items-center justify-center w-full px-8 py-4 font-bold text-lg text-primary-foreground transition-all duration-200 bg-primary rounded-xl hover:bg-lime-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary"
           >
             <span className="absolute inset-0 w-full h-full -mt-1 rounded-lg opacity-30 bg-gradient-to-b from-transparent via-transparent to-black"></span>
