@@ -239,7 +239,11 @@ export default function SessionPage() {
     )
       return;
 
+    // Clear session state first to prevent auto-save
+    setSession(null);
+    // Clear localStorage
     clearSession();
+    // Navigate to home
     router.push("/");
   };
 
