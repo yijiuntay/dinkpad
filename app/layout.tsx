@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { SpeedInsights } from '@vercel/speed-insights/next';
-import { Analytics } from "@vercel/analytics/next"
+import { SpeedInsights } from "@vercel/speed-insights/next";
+import { Analytics } from "@vercel/analytics/next";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,9 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "dinkpad | Ultimate Pickleball Session Organizer & Open Play Manager",
+  title: "dinkpad - Pickleball Session Manager",
   description:
-    "Automate and optimize your pickleball open play sessions with dinkpad. The premier app for fair court rotation, player management, and stress-free hosting. The perfect companion to ReClub for professional pickleball organizers.",
+    "Automate your pickleball open play with smart matchmaking and fair rotations",
   applicationName: "dinkpad",
   keywords: [
     "pickleball",

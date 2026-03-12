@@ -1,316 +1,747 @@
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Player, Game, PastGame } from './types';
-import { CourtCard } from './components/CourtCard';
-import { QueueList } from './components/QueueList';
-import { AddPlayerForm } from './components/AddPlayerForm';
+import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { Player, Match, SessionState, MatchmakingStrategy } from "../types";
+import {
+  loadSession,
+  saveSession,
+  clearSession,
+} from "../utils/sessionStorage";
+import { generateMatch, recordMatch } from "../utils/matchmaking";
 
 export default function SessionPage() {
+  const [session, setSession] = useState<SessionState | null>(null);
+  const [showStrategyModal, setShowStrategyModal] = useState(false);
+  const [showAddPlayerModal, setShowAddPlayerModal] = useState(false);
+  const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
+  const [newPlayerName, setNewPlayerName] = useState("");
+  const [newPlayerSkill, setNewPlayerSkill] = useState("");
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   const router = useRouter();
-  const [courts, setCourts] = useState<Game[]>([]);
-  const [queue, setQueue] = useState<Player[]>([]);
-  const [pastGames, setPastGames] = useState<PastGame[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [totalCourts, setTotalCourts] = useState(0);
-  const [isAddingPlayer, setIsAddingPlayer] = useState(false);
 
+  // Load session on mount
   useEffect(() => {
-    const activeSessionData = localStorage.getItem('dinkpad_active_session');
-
-    if (activeSessionData) {
-      try {
-        const parsed = JSON.parse(activeSessionData);
-        setCourts(parsed.courts || []);
-        setQueue(parsed.queue || []);
-        setPastGames(parsed.pastGames || []);
-        setTotalCourts(parsed.totalCourts || 0);
-        setLoading(false);
-      } catch (e) {
-        console.error("Failed to parse active session", e);
-        setLoading(false);
-      }
-    } else {
-      setLoading(false);
+    const loaded = loadSession();
+    if (!loaded) {
+      router.push("/setup");
+      return;
     }
-  }, []);
+    setSession(loaded);
+  }, [router]);
 
-  // Persist state whenever it changes
+  // Auto-save session whenever it changes
   useEffect(() => {
-    if (!loading) {
-      localStorage.setItem('dinkpad_active_session', JSON.stringify({ courts, queue, pastGames, totalCourts }));
+    if (session) {
+      saveSession(session);
     }
-  }, [courts, queue, pastGames, loading, totalCourts]);
+  }, [session]);
 
-  const findBestMatch = (candidates: Player[], history: PastGame[]) => {
-    // Helper to generate combinations of 4 players
-    const getCombinations = (arr: Player[], k: number): Player[][] => {
-      if (k === 0) return [[]];
-      if (arr.length === 0) return [];
-      const [first, ...rest] = arr;
-      const withFirst = getCombinations(rest, k - 1).map(c => [first, ...c]);
-      const withoutFirst = getCombinations(rest, k);
-      return [...withFirst, ...withoutFirst];
-    };
+  // Update wait times and current time every second
+  useEffect(() => {
+    if (!session) return;
 
-    // Only look at top 12 players to ensure wait times aren't too long
-    const pool = candidates.slice(0, 12);
-    const combinations = getCombinations(pool, 4);
+    const interval = setInterval(() => {
+      setCurrentTime(Date.now());
+      setSession((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          players: prev.players.map((p) =>
+            p.status === "waiting" ? { ...p, waitTime: p.waitTime + 1 } : p,
+          ),
+        };
+      });
+    }, 1000);
 
-    let bestCombo: Player[] = combinations[0];
-    let bestScore = Infinity;
+    return () => clearInterval(interval);
+  }, [session]);
 
-    combinations.forEach(combo => {
-      // 1. Skill Spread Score (Lower is better)
-      const ratings = combo.map(p => p.rating).filter(r => r > 0);
-      let skillScore = 0;
-      if (ratings.length > 0) {
-        const spread = Math.max(...ratings) - Math.min(...ratings);
-        skillScore = spread * 10; // Weight: 10
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const getMatchDuration = (match: Match): string => {
+    const elapsed = Math.floor((currentTime - match.startTime) / 1000);
+    return formatTime(elapsed);
+  };
+
+  const changeStrategy = (strategy: MatchmakingStrategy) => {
+    if (!session) return;
+    setSession({ ...session, currentStrategy: strategy });
+    setShowStrategyModal(false);
+  };
+
+  const startMatch = (courtNumber: number) => {
+    if (!session) return;
+
+    const matchId = `match_${session.nextMatchId}`;
+    const match = generateMatch(
+      courtNumber,
+      session.players,
+      session.currentStrategy,
+      session.matchHistory,
+      matchId,
+    );
+
+    if (!match) {
+      alert("Not enough players available to start a match!");
+      return;
+    }
+
+    // Update player statuses
+    const playingPlayerIds = [
+      match.teamA.partner1.id,
+      match.teamA.partner2.id,
+      match.teamB.partner1.id,
+      match.teamB.partner2.id,
+    ];
+
+    const updatedPlayers = session.players.map((p) => {
+      if (playingPlayerIds.includes(p.id)) {
+        return {
+          ...p,
+          status: "playing" as const,
+          waitTime: 0,
+          lastPlayedAt: Date.now(),
+        };
       }
-
-      // 2. Wait Time Score (Lower is better)
-      // We use the sum of indices in the original queue.
-      // Lower indices = longer wait time.
-      const waitScore = combo.reduce((sum, p) => sum + candidates.indexOf(p), 0) * 1; // Weight: 1
-
-      // 3. History Score (Avoid repeats)
-      // Count how many pairs in this combo have played together recently
-      let repeatScore = 0;
-      const recentGames = history.slice(-5); // Look at last 5 games
-      
-      for (let i = 0; i < combo.length; i++) {
-        for (let j = i + 1; j < combo.length; j++) {
-          const p1 = combo[i];
-          const p2 = combo[j];
-          
-          // Check if this pair played together in recent games
-          recentGames.forEach(g => {
-            const hasP1 = g.players.some(p => p.id === p1.id);
-            const hasP2 = g.players.some(p => p.id === p2.id);
-            if (hasP1 && hasP2) repeatScore += 1;
-          });
-        }
-      }
-      repeatScore *= 5; // Weight: 5 (High penalty for repeats)
-
-      const totalScore = skillScore + waitScore + repeatScore;
-
-      if (totalScore < bestScore) {
-        bestScore = totalScore;
-        bestCombo = combo;
-      }
+      return p;
     });
 
-    return bestCombo;
+    // Update court
+    const updatedCourts = session.courts.map((c) =>
+      c.number === courtNumber ? { ...c, currentMatch: match } : c,
+    );
+
+    setSession({
+      ...session,
+      players: updatedPlayers,
+      courts: updatedCourts,
+      nextMatchId: session.nextMatchId + 1,
+    });
   };
 
-  const startGame = (courtNumber: number) => {
-    if (queue.length < 4) return;
-    
-    // Find best 4 players
-    const gamePlayers = findBestMatch(queue, pastGames);
-    
-    // Remove selected players from queue
-    const nextQueue = queue.filter(p => !gamePlayers.find(gp => gp.id === p.id));
-    
-    const newGame: Game = {
-      id: `game-${Date.now()}-${courtNumber}`,
-      courtNumber,
-      players: gamePlayers,
-      startTime: Date.now()
-    };
+  const endMatch = (courtNumber: number) => {
+    if (!session) return;
 
-    setCourts([...courts, newGame]);
-    setQueue(nextQueue);
+    const court = session.courts.find((c) => c.number === courtNumber);
+    if (!court?.currentMatch) return;
+
+    const match = court.currentMatch;
+
+    // Record match history
+    const history = recordMatch(match);
+
+    // Update player statuses and game counts
+    const playingPlayerIds = [
+      match.teamA.partner1.id,
+      match.teamA.partner2.id,
+      match.teamB.partner1.id,
+      match.teamB.partner2.id,
+    ];
+
+    const updatedPlayers = session.players.map((p) => {
+      if (playingPlayerIds.includes(p.id)) {
+        return {
+          ...p,
+          status: "waiting" as const,
+          gamesPlayed: p.gamesPlayed + 1,
+        };
+      }
+      return p;
+    });
+
+    // Clear court
+    const updatedCourts = session.courts.map((c) =>
+      c.number === courtNumber ? { ...c, currentMatch: null } : c,
+    );
+
+    setSession({
+      ...session,
+      players: updatedPlayers,
+      courts: updatedCourts,
+      matchHistory: [...session.matchHistory, history],
+    });
   };
 
-  const finishGame = (gameId: string) => {
-    const game = courts.find(g => g.id === gameId);
-    if (!game) return;
+  const togglePlayerStatus = (playerId: string) => {
+    if (!session) return;
 
-    // Remove the finished game
-    const remainingCourts = courts.filter(g => g.id !== gameId);
-    
-    // Players from finished game go to back of queue
-    const playersFromGame = game.players;
-    const nextQueue = [...queue, ...playersFromGame];
-    
-    // Add to history
-    const newPastGame: PastGame = {
-      id: game.id,
-      players: game.players,
-      timestamp: Date.now()
-    };
-    
-    setCourts(remainingCourts);
-    setQueue(nextQueue);
-    setPastGames([...pastGames, newPastGame]);
+    const player = session.players.find((p) => p.id === playerId);
+    if (!player || player.status === "playing") return;
+
+    const newStatus: "waiting" | "paused" =
+      player.status === "waiting" ? "paused" : "waiting";
+
+    const updatedPlayers = session.players.map((p) =>
+      p.id === playerId
+        ? { ...p, status: newStatus as "waiting" | "paused" }
+        : p,
+    );
+
+    setSession({ ...session, players: updatedPlayers });
+    setSelectedPlayer(null);
   };
 
   const removePlayer = (playerId: string) => {
-    if (confirm('Remove this player from the queue?')) {
-      setQueue(queue.filter(p => p.id !== playerId));
+    if (!session) return;
+
+    const player = session.players.find((p) => p.id === playerId);
+    if (player?.status === "playing") {
+      alert("Cannot remove a player who is currently playing!");
+      return;
     }
+
+    if (!confirm(`Remove ${player?.name} from session?`)) return;
+
+    const updatedPlayers = session.players.filter((p) => p.id !== playerId);
+    setSession({ ...session, players: updatedPlayers });
+    setSelectedPlayer(null);
   };
 
-  const handleAddPlayer = (name: string, rating: number) => {
+  const addPlayer = () => {
+    if (!session || !newPlayerName.trim() || !newPlayerSkill.trim()) return;
+
+    const skill = parseFloat(newPlayerSkill);
+    if (isNaN(skill) || skill < 1 || skill > 5.5) {
+      alert("Please enter a valid skill rating between 1.0 and 5.5");
+      return;
+    }
+
     const newPlayer: Player = {
-      id: `p-${Date.now()}`,
-      name,
-      rating
+      id: `player_${session.nextPlayerId}`,
+      name: newPlayerName.trim(),
+      skill,
+      status: "waiting",
+      waitTime: 0,
+      gamesPlayed: 0,
     };
 
-    setQueue([...queue, newPlayer]);
+    setSession({
+      ...session,
+      players: [...session.players, newPlayer],
+      nextPlayerId: session.nextPlayerId + 1,
+    });
+
+    setNewPlayerName("");
+    setNewPlayerSkill("");
+    setShowAddPlayerModal(false);
   };
 
-  const removeCourt = (courtNum: number) => {
-    const gameOnCourt = courts.find(g => g.courtNumber === courtNum);
-    
-    if (gameOnCourt) {
-      if (!confirm(`There is an active game on Court ${courtNum}. Removing the court will cancel the game and return players to the queue. Continue?`)) {
-        return;
+  const endSession = () => {
+    if (
+      !confirm(
+        "Are you sure you want to end this session? This cannot be undone.",
+      )
+    )
+      return;
+
+    // Clear session state first to prevent auto-save
+    setSession(null);
+    // Clear localStorage
+    clearSession();
+    // Navigate to home
+    router.push("/");
+  };
+
+  const startAllMatches = () => {
+    if (!session) return;
+    session.courts.forEach((court) => {
+      if (!court.currentMatch && court.isActive) {
+        startMatch(court.number);
       }
-      
-      // Return players to the front of the queue since the game was cancelled
-      setQueue(prev => [...gameOnCourt.players, ...prev]);
-
-      // Remove the game on this court
-      setCourts(prev => {
-        const remaining = prev.filter(g => g.courtNumber !== courtNum);
-        // Shift games on higher courts down
-        return remaining.map(g => {
-          if (g.courtNumber > courtNum) {
-            return { ...g, courtNumber: g.courtNumber - 1, id: g.id.replace(/-(\d+)$/, `-${g.courtNumber - 1}`) };
-          }
-          return g;
-        });
-      });
-    } else {
-      // Just shift games on higher courts down
-      setCourts(prev => {
-        return prev.map(g => {
-          if (g.courtNumber > courtNum) {
-            return { ...g, courtNumber: g.courtNumber - 1, id: g.id.replace(/-(\d+)$/, `-${g.courtNumber - 1}`) };
-          }
-          return g;
-        });
-      });
-    }
-
-    setTotalCourts(prev => prev - 1);
+    });
   };
 
-  if (loading) {
+  if (!session) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-slate-400">Loading session...</div>
       </div>
     );
   }
 
-  // Helper to get active game for a court index
-  const getGameForCourt = (courtNum: number) => courts.find(g => g.courtNumber === courtNum);
+  const playingPlayers = session.players.filter((p) => p.status === "playing");
+  const waitingPlayers = session.players.filter((p) => p.status === "waiting");
+  const pausedPlayers = session.players.filter((p) => p.status === "paused");
+
+  const strategyLabels = {
+    balanced: "⚖️ Balanced",
+    "wait-time": "⏱️ Wait Time",
+    variety: "🔄 Variety",
+  };
 
   return (
-    <div className="min-h-screen p-6 relative overflow-hidden">
-      {/* Decorative background glow */}
-      <div className="absolute -top-20 -right-20 w-96 h-96 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute top-1/2 -left-20 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
-
-      <header className="mb-8 flex justify-between items-center relative z-10">
-        <div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-primary to-emerald-400 bg-clip-text text-transparent">
-            Live Session
-          </h1>
-          <p className="text-slate-400">Manage courts and queue</p>
-        </div>
-        <button 
-          onClick={() => {
-            if (confirm('Are you sure you want to end the session? All progress will be lost.')) {
-              localStorage.removeItem('dinkpad_active_session');
-              router.push('/');
-            }
-          }}
-          className="px-4 py-2 bg-slate-800/50 hover:bg-slate-700/50 border border-white/10 backdrop-blur-md rounded-lg text-sm transition-all hover:border-primary/30"
-        >
-          End Session
-        </button>
-      </header>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 relative z-10">
-        {/* Active Games Section */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_10px_rgba(34,197,94,0.5)]"/>
-              Active Courts
-            </h2>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setTotalCourts(prev => prev + 1)}
-                className="px-3 py-1 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg text-sm font-medium transition-colors"
+    <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-950 pb-24">
+      {/* Header */}
+      <div className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 shadow-lg">
+        <div className="max-w-4xl mx-auto px-4 py-3">
+          <div className="flex items-center justify-between mb-2">
+            <h1 className="text-xl font-bold text-primary">DinkPad</h1>
+            <button
+              onClick={endSession}
+              className="text-sm text-red-400 hover:text-red-300 font-medium"
+            >
+              End Session
+            </button>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-slate-400">
+                {session.courts.filter((c) => c.isActive).length} Courts
+              </span>
+              <span className="text-slate-400">•</span>
+              <span className="text-slate-300">
+                {session.players.length} Players
+              </span>
+            </div>
+            <button
+              onClick={() => setShowStrategyModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+            >
+              <span className="text-slate-300 text-xs font-medium">
+                {strategyLabels[session.currentStrategy]}
+              </span>
+              <svg
+                className="w-4 h-4 text-slate-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
               >
-                + Add Court
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M19 9l-7 7-7-7"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+        {/* Quick Actions */}
+        <div className="flex gap-2">
+          <button
+            onClick={startAllMatches}
+            className="flex-1 py-3 bg-primary text-primary-foreground rounded-xl font-bold hover:bg-lime-400 transition-colors shadow-lg"
+          >
+            Start All Matches
+          </button>
+        </div>
+
+        {/* Courts Section */}
+        <div className="space-y-3">
+          <h2 className="text-lg font-bold text-slate-200 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-green-500"></span>
+            PLAYING ({playingPlayers.length})
+          </h2>
+
+          {session.courts
+            .filter((c) => c.isActive)
+            .map((court) => (
+              <div
+                key={court.number}
+                className="glass-panel rounded-2xl p-4 border border-slate-700/50"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-base font-bold text-slate-200">
+                    Court {court.number}
+                  </h3>
+                  {court.currentMatch && (
+                    <div className="flex items-center gap-2 text-slate-400 text-sm">
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                      <span>{getMatchDuration(court.currentMatch)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {court.currentMatch ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-[1fr_auto_1fr] gap-3 items-center">
+                      {/* Team A */}
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500 mb-1">
+                          Team A
+                        </div>
+                        <div className="text-sm font-medium text-slate-200">
+                          {court.currentMatch.teamA.partner1.name}
+                        </div>
+                        <div className="text-sm font-medium text-slate-200">
+                          {court.currentMatch.teamA.partner2.name}
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1">
+                          Avg: {court.currentMatch.teamA.avgSkill.toFixed(1)}
+                        </div>
+                      </div>
+
+                      {/* VS */}
+                      <div className="text-slate-500 font-bold text-sm">vs</div>
+
+                      {/* Team B */}
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500 mb-1">
+                          Team B
+                        </div>
+                        <div className="text-sm font-medium text-slate-200">
+                          {court.currentMatch.teamB.partner1.name}
+                        </div>
+                        <div className="text-sm font-medium text-slate-200">
+                          {court.currentMatch.teamB.partner2.name}
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1">
+                          Avg: {court.currentMatch.teamB.avgSkill.toFixed(1)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => endMatch(court.number)}
+                      className="w-full py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg font-medium transition-colors"
+                    >
+                      End Game
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => startMatch(court.number)}
+                    disabled={waitingPlayers.length < 4}
+                    className={`w-full py-3 rounded-lg font-medium transition-colors ${
+                      waitingPlayers.length >= 4
+                        ? "bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30"
+                        : "bg-slate-800 text-slate-500 cursor-not-allowed"
+                    }`}
+                  >
+                    {waitingPlayers.length >= 4
+                      ? "Start Match"
+                      : "Need 4+ Players"}
+                  </button>
+                )}
+              </div>
+            ))}
+        </div>
+
+        {/* Waiting Queue */}
+        <div className="space-y-3">
+          <h2 className="text-lg font-bold text-slate-200 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-yellow-500"></span>
+            WAITING ({waitingPlayers.length})
+          </h2>
+
+          {waitingPlayers.length > 0 ? (
+            <div className="space-y-2">
+              {waitingPlayers
+                .sort((a, b) => b.waitTime - a.waitTime)
+                .map((player) => (
+                  <div
+                    key={player.id}
+                    className="glass-panel rounded-xl p-4 border border-slate-700/50 flex items-center justify-between"
+                  >
+                    <div className="flex-1">
+                      <div className="font-medium text-slate-200">
+                        {player.name}
+                      </div>
+                      <div className="text-xs text-slate-400 flex items-center gap-3 mt-1">
+                        <span>Skill: {player.skill}</span>
+                        <span>•</span>
+                        <span className="flex items-center gap-1">
+                          <svg
+                            className="w-3 h-3"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                          {formatTime(player.waitTime)}
+                        </span>
+                        <span>•</span>
+                        <span>Games: {player.gamesPlayed}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSelectedPlayer(player)}
+                      className="ml-3 p-2 hover:bg-slate-700 rounded-lg transition-colors"
+                    >
+                      <svg
+                        className="w-5 h-5 text-slate-400"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <div className="glass-panel rounded-xl p-8 text-center text-slate-500">
+              No players waiting
+            </div>
+          )}
+        </div>
+
+        {/* Paused Players */}
+        {pausedPlayers.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-lg font-bold text-slate-200 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+              PAUSED ({pausedPlayers.length})
+            </h2>
+
+            <div className="space-y-2">
+              {pausedPlayers.map((player) => (
+                <div
+                  key={player.id}
+                  className="glass-panel rounded-xl p-4 border border-slate-700/50 flex items-center justify-between opacity-60"
+                >
+                  <div className="flex-1">
+                    <div className="font-medium text-slate-200">
+                      {player.name}
+                    </div>
+                    <div className="text-xs text-slate-400">
+                      Skill: {player.skill} • Games: {player.gamesPlayed}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => togglePlayerStatus(player.id)}
+                    className="ml-3 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    Resume
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom Action Bar */}
+      <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-800 shadow-lg">
+        <div className="max-w-4xl mx-auto px-4 py-4">
+          <button
+            onClick={() => setShowAddPlayerModal(true)}
+            className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-medium transition-colors flex items-center justify-center gap-2"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            Add Player
+          </button>
+        </div>
+      </div>
+
+      {/* Strategy Modal */}
+      {showStrategyModal && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4"
+          onClick={() => setShowStrategyModal(false)}
+        >
+          <div
+            className="bg-slate-900 rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 border border-slate-700 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold text-slate-200 mb-4">
+              Select Matchmaking Strategy
+            </h3>
+            <div className="space-y-2">
+              <button
+                onClick={() => changeStrategy("balanced")}
+                className={`w-full text-left p-4 rounded-xl transition-colors ${
+                  session.currentStrategy === "balanced"
+                    ? "bg-primary/20 border-2 border-primary"
+                    : "bg-slate-800 hover:bg-slate-700 border-2 border-transparent"
+                }`}
+              >
+                <div className="font-bold text-slate-200 mb-1">
+                  ⚖️ Balanced Skill Gap
+                </div>
+                <div className="text-sm text-slate-400">
+                  Prioritizes fair team strength and competitive games
+                </div>
+              </button>
+
+              <button
+                onClick={() => changeStrategy("wait-time")}
+                className={`w-full text-left p-4 rounded-xl transition-colors ${
+                  session.currentStrategy === "wait-time"
+                    ? "bg-primary/20 border-2 border-primary"
+                    : "bg-slate-800 hover:bg-slate-700 border-2 border-transparent"
+                }`}
+              >
+                <div className="font-bold text-slate-200 mb-1">
+                  ⏱️ Minimize Wait Time
+                </div>
+                <div className="text-sm text-slate-400">
+                  Gets players back on court ASAP, longest wait first
+                </div>
+              </button>
+
+              <button
+                onClick={() => changeStrategy("variety")}
+                className={`w-full text-left p-4 rounded-xl transition-colors ${
+                  session.currentStrategy === "variety"
+                    ? "bg-primary/20 border-2 border-primary"
+                    : "bg-slate-800 hover:bg-slate-700 border-2 border-transparent"
+                }`}
+              >
+                <div className="font-bold text-slate-200 mb-1">
+                  🔄 Maximize Variety
+                </div>
+                <div className="text-sm text-slate-400">
+                  Avoids repeat pairings to ensure social mixing
+                </div>
               </button>
             </div>
           </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {Array.from({ length: totalCourts }).map((_, i) => {
-              const courtNum = i + 1;
-              const game = getGameForCourt(courtNum);
+        </div>
+      )}
 
-              return (
-                <CourtCard 
-                  key={courtNum}
-                  courtNum={courtNum}
-                  game={game}
-                  queueLength={queue.length}
-                  onFinishGame={finishGame}
-                  onStartGame={startGame}
-                  onRemove={removeCourt}
+      {/* Player Options Modal */}
+      {selectedPlayer && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4"
+          onClick={() => setSelectedPlayer(null)}
+        >
+          <div
+            className="bg-slate-900 rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 border border-slate-700 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold text-slate-200 mb-2">
+              {selectedPlayer.name}
+            </h3>
+            <p className="text-slate-400 text-sm mb-6">
+              Skill: {selectedPlayer.skill} • Games:{" "}
+              {selectedPlayer.gamesPlayed}
+            </p>
+            <div className="space-y-2">
+              <button
+                onClick={() => togglePlayerStatus(selectedPlayer.id)}
+                className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-medium transition-colors"
+              >
+                {selectedPlayer.status === "waiting"
+                  ? "Pause Player"
+                  : "Resume Player"}
+              </button>
+              <button
+                onClick={() => removePlayer(selectedPlayer.id)}
+                className="w-full py-3 bg-red-900/20 hover:bg-red-900/30 text-red-400 rounded-xl font-medium transition-colors border border-red-900/30"
+              >
+                Remove from Session
+              </button>
+              <button
+                onClick={() => setSelectedPlayer(null)}
+                className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-xl font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Player Modal */}
+      {showAddPlayerModal && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4"
+          onClick={() => setShowAddPlayerModal(false)}
+        >
+          <div
+            className="bg-slate-900 rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 border border-slate-700 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold text-slate-200 mb-4">
+              Add New Player
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Player Name
+                </label>
+                <input
+                  type="text"
+                  value={newPlayerName}
+                  onChange={(e) => setNewPlayerName(e.target.value)}
+                  placeholder="Enter name"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
+                  autoFocus
                 />
-              );
-            })}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Skill Rating (1.0 - 5.5)
+                </label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="1"
+                  max="5.5"
+                  value={newPlayerSkill}
+                  onChange={(e) => setNewPlayerSkill(e.target.value)}
+                  placeholder="3.5"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => setShowAddPlayerModal(false)}
+                  className="flex-1 py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-xl font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={addPlayer}
+                  disabled={!newPlayerName.trim() || !newPlayerSkill.trim()}
+                  className={`flex-1 py-3 rounded-xl font-medium transition-colors ${
+                    newPlayerName.trim() && newPlayerSkill.trim()
+                      ? "bg-primary hover:bg-lime-400 text-primary-foreground"
+                      : "bg-slate-800 text-slate-500 cursor-not-allowed"
+                  }`}
+                >
+                  Add Player
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-
-        {/* Queue Section */}
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
-            <h2 className="text-xl font-semibold">Queue</h2>
-            <span className="px-2 py-1 bg-slate-800/50 border border-white/5 rounded text-xs text-slate-400">
-              {queue.length} waiting
-            </span>
-          </div>
-          
-          {/* Add Player Form/Button */}
-          {!isAddingPlayer ? (
-            <button
-              onClick={() => setIsAddingPlayer(true)}
-              className="w-full py-3 border border-dashed border-slate-700 rounded-xl text-slate-400 hover:text-primary hover:border-primary/50 hover:bg-slate-800/50 transition-all text-sm font-medium flex items-center justify-center gap-2"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              Add Player
-            </button>
-          ) : (
-            <AddPlayerForm 
-              onAddPlayer={handleAddPlayer}
-              onCancel={() => setIsAddingPlayer(false)}
-            />
-          )}
-
-          <QueueList 
-            queue={queue}
-            onRemovePlayer={removePlayer}
-            onUpdateRating={(playerId, newRating) => {
-              setQueue(queue.map(p => p.id === playerId ? { ...p, rating: Math.max(0, Math.min(10, newRating)) } : p));
-            }}
-          />
-        </div>
-      </div>
+      )}
     </div>
   );
 }
