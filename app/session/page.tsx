@@ -84,6 +84,7 @@ export default function SessionPage() {
       session.currentStrategy,
       session.matchHistory,
       matchId,
+      session.courtCount,
     );
 
     if (!match) {
@@ -101,11 +102,19 @@ export default function SessionPage() {
 
     const updatedPlayers = session.players.map((p) => {
       if (playingPlayerIds.includes(p.id)) {
+        // Selected players: reset skip counter, set to playing
         return {
           ...p,
           status: "playing" as const,
           waitTime: 0,
           lastPlayedAt: Date.now(),
+          consecutiveSkips: 0,
+        };
+      } else if (p.status === "waiting" || p.status === "paused") {
+        // Not selected: increment skip counter
+        return {
+          ...p,
+          consecutiveSkips: p.consecutiveSkips + 1,
         };
       }
       return p;
@@ -218,6 +227,7 @@ export default function SessionPage() {
       status: "waiting",
       waitTime: 0,
       gamesPlayed: 0,
+      consecutiveSkips: 0,
     };
 
     setSession({
@@ -448,58 +458,106 @@ export default function SessionPage() {
             <div className="space-y-2">
               {waitingPlayers
                 .sort((a, b) => b.waitTime - a.waitTime)
-                .map((player) => (
-                  <div
-                    key={player.id}
-                    className="glass-panel rounded-xl p-4 border border-slate-700/50 flex items-center justify-between"
-                  >
-                    <div className="flex-1">
-                      <div className="font-medium text-slate-200">
-                        {player.name}
-                      </div>
-                      <div className="text-xs text-slate-400 flex items-center gap-3 mt-1">
-                        <span>Skill: {player.skill}</span>
-                        <span>•</span>
-                        <span className="flex items-center gap-1">
-                          <svg
-                            className="w-3 h-3"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth="2"
-                              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                            />
-                          </svg>
-                          {formatTime(player.waitTime)}
-                        </span>
-                        <span>•</span>
-                        <span>Games: {player.gamesPlayed}</span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setSelectedPlayer(player)}
-                      className="ml-3 p-2 hover:bg-slate-700 rounded-lg transition-colors"
+                .map((player) => {
+                  const skipThreshold = session.courtCount + 1;
+                  const isAtThreshold =
+                    player.consecutiveSkips >= skipThreshold;
+                  const isNearThreshold =
+                    player.consecutiveSkips >= session.courtCount;
+
+                  return (
+                    <div
+                      key={player.id}
+                      className={`glass-panel rounded-xl p-4 border flex items-center justify-between ${
+                        isAtThreshold
+                          ? "border-red-500/50 bg-red-900/10"
+                          : isNearThreshold
+                            ? "border-yellow-500/50 bg-yellow-900/10"
+                            : "border-slate-700/50"
+                      }`}
                     >
-                      <svg
-                        className="w-5 h-5 text-slate-400"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-slate-200">
+                            {player.name}
+                          </span>
+                          {isAtThreshold && (
+                            <span
+                              className="text-sm"
+                              title="Priority: Will be in next match"
+                            >
+                              🔴
+                            </span>
+                          )}
+                          {!isAtThreshold && isNearThreshold && (
+                            <span
+                              className="text-sm"
+                              title="Warning: Close to max wait"
+                            >
+                              ⚠️
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-slate-400 flex items-center gap-3 mt-1">
+                          <span>Skill: {player.skill}</span>
+                          <span>•</span>
+                          <span className="flex items-center gap-1">
+                            <svg
+                              className="w-3 h-3"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth="2"
+                                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                              />
+                            </svg>
+                            {formatTime(player.waitTime)}
+                          </span>
+                          <span>•</span>
+                          <span>Games: {player.gamesPlayed}</span>
+                          {player.consecutiveSkips > 0 && (
+                            <>
+                              <span>•</span>
+                              <span
+                                className={`${
+                                  isAtThreshold
+                                    ? "text-red-400 font-medium"
+                                    : isNearThreshold
+                                      ? "text-yellow-400 font-medium"
+                                      : ""
+                                }`}
+                              >
+                                Skipped: {player.consecutiveSkips}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setSelectedPlayer(player)}
+                        className="ml-3 p-2 hover:bg-slate-700 rounded-lg transition-colors"
                       >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2"
-                          d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
+                        <svg
+                          className="w-5 h-5 text-slate-400"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })}
             </div>
           ) : (
             <div className="glass-panel rounded-xl p-8 text-center text-slate-500">
