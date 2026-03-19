@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Player, SessionState, Court } from "../types";
 import { saveSession, hasActiveSession } from "../utils/sessionStorage";
@@ -9,12 +9,14 @@ export default function SetupPage() {
   const [courtCount, setCourtCount] = useState(4);
   const [playerInput, setPlayerInput] = useState("");
   const [dismissWarning, setDismissWarning] = useState(false);
+  const [activeSessionExists, setActiveSessionExists] = useState(() =>
+    hasActiveSession(),
+  );
   const router = useRouter();
 
-  // Check if there's an active session
   const showWarning = useMemo(
-    () => !dismissWarning && hasActiveSession(),
-    [dismissWarning],
+    () => !dismissWarning && activeSessionExists,
+    [dismissWarning, activeSessionExists],
   );
 
   const handleStartSession = (e: React.FormEvent) => {
