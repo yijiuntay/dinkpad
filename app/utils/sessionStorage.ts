@@ -3,6 +3,7 @@ import { SessionState } from "../types";
 const SESSION_KEY = "dinkpad_session_v1";
 
 export function saveSession(state: SessionState): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify(state));
   } catch (error) {
@@ -12,6 +13,7 @@ export function saveSession(state: SessionState): void {
 }
 
 export function loadSession(): SessionState | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
   try {
     const saved = localStorage.getItem(SESSION_KEY);
     if (!saved) return null;
@@ -35,6 +37,7 @@ export function loadSession(): SessionState | null {
 }
 
 export function clearSession(): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
   try {
     localStorage.removeItem(SESSION_KEY);
   } catch (error) {
