@@ -15,7 +15,19 @@ export function loadSession(): SessionState | null {
   try {
     const saved = localStorage.getItem(SESSION_KEY);
     if (!saved) return null;
-    return JSON.parse(saved) as SessionState;
+
+    const session = JSON.parse(saved) as SessionState;
+
+    // Migrate old sessions: add consecutiveSkips if missing
+    const migratedPlayers = session.players.map((player) => ({
+      ...player,
+      consecutiveSkips: player.consecutiveSkips ?? 0,
+    }));
+
+    return {
+      ...session,
+      players: migratedPlayers,
+    };
   } catch (error) {
     console.error("Failed to load session:", error);
     return null;

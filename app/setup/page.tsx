@@ -44,6 +44,7 @@ export default function SetupPage() {
           status: "waiting",
           waitTime: 0,
           gamesPlayed: 0,
+          consecutiveSkips: 0,
         });
       }
     }

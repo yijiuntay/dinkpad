@@ -12,6 +12,25 @@ function calculateTeamSkill(p1: Player, p2: Player): number {
   return (p1.skill + p2.skill) / 2;
 }
 
+// Helper to separate players by priority based on skip count
+function separateByPriority(
+  players: Player[],
+  skipThreshold: number,
+): { critical: Player[]; normal: Player[] } {
+  const critical: Player[] = [];
+  const normal: Player[] = [];
+
+  for (const player of players) {
+    if (player.consecutiveSkips >= skipThreshold) {
+      critical.push(player);
+    } else {
+      normal.push(player);
+    }
+  }
+
+  return { critical, normal };
+}
+
 // Helper to get pairing count from history
 function getPairingCount(
   history: MatchHistory[],
@@ -263,24 +282,91 @@ export function generateMatch(
   strategy: MatchmakingStrategy,
   history: MatchHistory[],
   matchId: string,
+  courtCount: number,
 ): Match | null {
   // Get available players (waiting or paused with low wait time)
   const availablePlayers = players.filter((p) => p.status === "waiting");
 
   if (availablePlayers.length < 4) return null;
 
+  // Calculate skip threshold (courtCount + 1)
+  const skipThreshold = courtCount + 1;
+
+  // Separate players by priority
+  const { critical, normal } = separateByPriority(
+    availablePlayers,
+    skipThreshold,
+  );
+
   let selectedPlayers: Player[] | null = null;
 
-  switch (strategy) {
-    case "balanced":
-      selectedPlayers = matchBalanced(availablePlayers, history);
-      break;
-    case "wait-time":
-      selectedPlayers = matchWaitTime(availablePlayers, history);
-      break;
-    case "variety":
-      selectedPlayers = matchVariety(availablePlayers, history);
-      break;
+  // Priority 1: If we have 4+ critical players, take top 4 by wait time
+  if (critical.length >= 4) {
+    const sortedCritical = [...critical].sort(
+      (a, b) => b.waitTime - a.waitTime,
+    );
+    const selected = sortedCritical.slice(0, 4);
+    // Sort by skill to create balanced teams
+    selected.sort((a, b) => b.skill - a.skill);
+    selectedPlayers = [selected[0], selected[3], selected[1], selected[2]];
+  }
+  // Priority 2: If we have 1-3 critical players, include them + fill from normal pool
+  else if (critical.length > 0 && critical.length < 4) {
+    // Sort critical by wait time
+    const sortedCritical = [...critical].sort(
+      (a, b) => b.waitTime - a.waitTime,
+    );
+
+    // Apply strategy to normal pool to get remaining slots
+    const neededCount = 4 - critical.length;
+    let remainingPlayers: Player[] | null = null;
+
+    switch (strategy) {
+      case "balanced":
+        remainingPlayers = matchBalanced(normal, history);
+        break;
+      case "wait-time":
+        remainingPlayers = matchWaitTime(normal, history);
+        break;
+      case "variety":
+        remainingPlayers = matchVariety(normal, history);
+        break;
+    }
+
+    if (remainingPlayers && remainingPlayers.length >= neededCount) {
+      // Combine critical + needed normal players
+      const combined = [
+        ...sortedCritical,
+        ...remainingPlayers.slice(0, neededCount),
+      ];
+      // Sort by skill to create balanced teams
+      combined.sort((a, b) => b.skill - a.skill);
+      selectedPlayers = [combined[0], combined[3], combined[1], combined[2]];
+    } else {
+      // Fallback: sort all available by wait time if strategy fails
+      const allSorted = [...sortedCritical, ...normal].sort(
+        (a, b) => b.waitTime - a.waitTime,
+      );
+      if (allSorted.length >= 4) {
+        const selected = allSorted.slice(0, 4);
+        selected.sort((a, b) => b.skill - a.skill);
+        selectedPlayers = [selected[0], selected[3], selected[1], selected[2]];
+      }
+    }
+  }
+  // Priority 3: No critical players, use normal strategy
+  else {
+    switch (strategy) {
+      case "balanced":
+        selectedPlayers = matchBalanced(availablePlayers, history);
+        break;
+      case "wait-time":
+        selectedPlayers = matchWaitTime(availablePlayers, history);
+        break;
+      case "variety":
+        selectedPlayers = matchVariety(availablePlayers, history);
+        break;
+    }
   }
 
   if (!selectedPlayers) return null;

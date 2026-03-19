@@ -10,6 +10,7 @@ export interface Player {
   waitTime: number; // in seconds
   gamesPlayed: number;
   lastPlayedAt?: number; // timestamp
+  consecutiveSkips: number; // count of match starts without being selected
 }
 
 export interface Team {
