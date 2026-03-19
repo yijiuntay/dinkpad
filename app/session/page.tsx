@@ -259,10 +259,72 @@ export default function SessionPage() {
 
   const startAllMatches = () => {
     if (!session) return;
+
+    // Work with local copies to avoid state race conditions
+    let updatedPlayers = [...session.players];
+    let updatedCourts = [...session.courts];
+    let nextMatchId = session.nextMatchId;
+
+    // Process each empty court sequentially
     session.courts.forEach((court) => {
       if (!court.currentMatch && court.isActive) {
-        startMatch(court.number);
+        const matchId = `match_${nextMatchId}`;
+
+        // Generate match using current state
+        const match = generateMatch(
+          court.number,
+          updatedPlayers,
+          session.currentStrategy,
+          session.matchHistory,
+          matchId,
+          session.courtCount,
+        );
+
+        if (match) {
+          // Update player statuses locally
+          const playingPlayerIds = [
+            match.teamA.partner1.id,
+            match.teamA.partner2.id,
+            match.teamB.partner1.id,
+            match.teamB.partner2.id,
+          ];
+
+          updatedPlayers = updatedPlayers.map((p) => {
+            if (playingPlayerIds.includes(p.id)) {
+              // Selected players: reset skip counter, set to playing
+              return {
+                ...p,
+                status: "playing" as const,
+                waitTime: 0,
+                lastPlayedAt: Date.now(),
+                consecutiveSkips: 0,
+              };
+            } else if (p.status === "waiting" || p.status === "paused") {
+              // Not selected: increment skip counter
+              return {
+                ...p,
+                consecutiveSkips: p.consecutiveSkips + 1,
+              };
+            }
+            return p;
+          });
+
+          // Update court locally
+          updatedCourts = updatedCourts.map((c) =>
+            c.number === court.number ? { ...c, currentMatch: match } : c,
+          );
+
+          nextMatchId++;
+        }
       }
+    });
+
+    // Apply all changes in a single state update
+    setSession({
+      ...session,
+      players: updatedPlayers,
+      courts: updatedCourts,
+      nextMatchId: nextMatchId,
     });
   };
 
