@@ -1,99 +1,92 @@
 "use client";
-
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Player, SessionState, Court } from "../types";
 import { saveSession, hasActiveSession } from "../utils/sessionStorage";
+import {
+  parseBulkInput,
+  DEFAULT_TIER_CONFIGS,
+  DEFAULT_TIER_CONFIG,
+} from "../utils/tierUtils";
+import { createPlayer } from "../utils/playerStateUtils";
+import type { TierConfig } from "../types";
 
 export default function SetupPage() {
   const [courtCount, setCourtCount] = useState(4);
+  const [tierCount, setTierCount] = useState<3 | 4 | 5>(4);
+  const [tierConfig, setTierConfig] = useState<TierConfig>(DEFAULT_TIER_CONFIG);
   const [playerInput, setPlayerInput] = useState("");
-  const [dismissWarning, setDismissWarning] = useState(false);
-  const [activeSessionExists, setActiveSessionExists] = useState(() =>
-    hasActiveSession(),
+  const [checkInMode, setCheckInMode] = useState<"roster" | "checked-in">(
+    "roster",
   );
+  const [activeSessionExists] = useState(() => hasActiveSession());
+  const [dismissWarning, setDismissWarning] = useState(false);
   const router = useRouter();
 
-  const showWarning = useMemo(
-    () => !dismissWarning && activeSessionExists,
-    [dismissWarning, activeSessionExists],
+  const parsedPlayers = useMemo(
+    () => parseBulkInput(playerInput, tierConfig),
+    [playerInput, tierConfig],
   );
+
+  const validPlayers = useMemo(
+    () => parsedPlayers.filter((p) => p.valid && p.name),
+    [parsedPlayers],
+  );
+
+  const unratedCount = useMemo(
+    () => validPlayers.filter((p) => p.tier === null).length,
+    [validPlayers],
+  );
+
+  const handleTierCountChange = (count: 3 | 4 | 5) => {
+    setTierCount(count);
+    setTierConfig(DEFAULT_TIER_CONFIGS[count]);
+  };
 
   const handleStartSession = (e: React.FormEvent) => {
     e.preventDefault();
+    if (validPlayers.length < 4 || courtCount < 1) return;
 
-    if (courtCount < 1 || !playerInput.trim()) return;
+    const now = Date.now();
+    const immediateCheckIn = checkInMode === "checked-in";
 
-    // Parse players
-    const lines = playerInput
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line);
-    const players: Player[] = [];
+    const players = validPlayers.map((line, i) =>
+      createPlayer(i + 1, line.name, line.tier, immediateCheckIn, now),
+    );
 
-    for (let i = 0; i < lines.length; i++) {
-      const parts = lines[i].split(/\s+/);
-      if (parts.length < 2) continue;
+    const courts = Array.from({ length: courtCount }, (_, i) => ({
+      id: `court_${i + 1}`,
+      name: `Court ${i + 1}`,
+      isActive: true,
+      mode: "normal" as const,
+    }));
 
-      const skill = parseFloat(parts[parts.length - 1]);
-      const name = parts.slice(0, -1).join(" ");
-
-      if (name && !isNaN(skill)) {
-        players.push({
-          id: `player_${i + 1}`,
-          name,
-          skill,
-          status: "waiting",
-          waitTime: 0,
-          gamesPlayed: 0,
-          consecutiveSkips: 0,
-        });
-      }
-    }
-
-    if (players.length < 4) {
-      alert("You need at least 4 players to start a session.");
-      return;
-    }
-
-    // Initialize courts
-    const courts: Court[] = [];
-    for (let i = 1; i <= courtCount; i++) {
-      courts.push({
-        number: i,
-        currentMatch: null,
-        isActive: true,
-      });
-    }
-
-    // Create initial session state
-    const sessionState: SessionState = {
+    const sessionState = {
       players,
       courts,
       matchHistory: [],
-      currentStrategy: "balanced",
-      sessionStartTime: Date.now(),
-      courtCount,
+      activeMatches: [],
+      undoableMatches: [],
+      tierConfig,
+      currentStrategy: "balanced" as const,
+      strategyConfig: { primary: "balanced" as const },
+      constraints: { fixedPairs: [], doNotPair: [] },
+      sessionStartTime: now,
+      sessionId: Math.random().toString(36).slice(2, 11),
       nextPlayerId: players.length + 1,
       nextMatchId: 1,
     };
 
-    // Save to localStorage
     saveSession(sessionState);
-
-    // Navigate to session page
     router.push("/session");
   };
 
-  const handleResumeSession = () => {
-    router.push("/session");
-  };
+  const canStart = validPlayers.length >= 4 && courtCount >= 1;
+  const showWarning = !dismissWarning && activeSessionExists;
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <main className="w-full max-w-lg">
         <div className="glass-panel rounded-2xl p-8 shadow-2xl border border-white/10 relative overflow-hidden">
-          {/* Decorative background glow */}
           <div className="absolute -top-20 -right-20 w-64 h-64 bg-primary/20 rounded-full blur-3xl pointer-events-none" />
           <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-blue-500/20 rounded-full blur-3xl pointer-events-none" />
 
@@ -105,7 +98,6 @@ export default function SetupPage() {
               Configure your pickleball session
             </p>
 
-            {/* Warning Modal */}
             {showWarning && (
               <div className="mb-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
                 <div className="flex items-start gap-3">
@@ -131,7 +123,7 @@ export default function SetupPage() {
                     </p>
                     <div className="flex gap-2">
                       <button
-                        onClick={handleResumeSession}
+                        onClick={() => router.push("/session")}
                         className="px-4 py-2 bg-yellow-500 text-yellow-950 rounded-lg font-medium text-sm hover:bg-yellow-400 transition-colors"
                       >
                         Resume Session
@@ -149,29 +141,74 @@ export default function SetupPage() {
             )}
 
             <form className="space-y-6" onSubmit={handleStartSession}>
+              {/* Court Count */}
               <div className="space-y-2">
-                <label
-                  htmlFor="courtCount"
-                  className="block text-sm font-medium text-slate-300"
-                >
+                <label className="block text-sm font-medium text-slate-300">
                   Number of Courts
                 </label>
-                <input
-                  type="number"
-                  id="courtCount"
-                  min="1"
-                  value={courtCount}
-                  onChange={(e) => setCourtCount(parseInt(e.target.value) || 0)}
-                  className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
-                />
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setCourtCount((c) => Math.max(1, c - 1))}
+                    className="w-11 h-11 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xl font-bold transition-colors border border-slate-700"
+                  >
+                    −
+                  </button>
+                  <span className="flex-1 text-center text-2xl font-bold text-white">
+                    {courtCount}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCourtCount((c) => c + 1)}
+                    className="w-11 h-11 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xl font-bold transition-colors border border-slate-700"
+                  >
+                    +
+                  </button>
+                </div>
               </div>
 
+              {/* Tier Configuration */}
+              <div className="space-y-3">
+                <label className="block text-sm font-medium text-slate-300">
+                  Tier System
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([3, 4, 5] as const).map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => handleTierCountChange(n)}
+                      className={`py-2.5 rounded-xl text-sm font-medium transition-colors border ${
+                        tierCount === n
+                          ? "bg-primary/20 border-primary text-primary"
+                          : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                      }`}
+                    >
+                      {n} Tiers
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-2 justify-center">
+                  {tierConfig.tiers.map((t, i) => (
+                    <span
+                      key={t}
+                      className="px-3 py-1 rounded-lg bg-slate-800 text-slate-300 text-sm border border-slate-700"
+                    >
+                      {i === 0 ? "Low" : i === tierConfig.tiers.length - 1 ? "High" : ""}
+                      {i > 0 && i < tierConfig.tiers.length - 1 ? "Mid" : ""}{" "}
+                      <span className="font-bold text-primary">{t}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Players Input */}
               <div className="space-y-2">
                 <label
                   htmlFor="players"
                   className="block text-sm font-medium text-slate-300"
                 >
-                  Players & Skill Ratings
+                  Players &amp; Skill Tiers
                 </label>
                 <div className="relative">
                   <textarea
@@ -179,34 +216,93 @@ export default function SetupPage() {
                     rows={8}
                     value={playerInput}
                     onChange={(e) => setPlayerInput(e.target.value)}
-                    placeholder={`Paste player list here...
-John Doe 4.5
-Jane Smith 3.0`}
+                    placeholder={`Paste player list here...\nJohn Doe A\nJane Smith B\nCharlie (unrated)`}
                     className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all resize-none font-mono text-sm"
                   />
                   <div className="absolute bottom-3 right-3 text-xs text-slate-500">
-                    {
-                      playerInput.split("\n").filter((line) => line.trim())
-                        .length
-                    }{" "}
-                    players
+                    {validPlayers.length} valid
                   </div>
                 </div>
+
+                {/* Per-line validation */}
+                {parsedPlayers.length > 0 && (
+                  <div className="max-h-36 overflow-y-auto space-y-0.5 rounded-xl bg-slate-900/50 border border-slate-800 p-2">
+                    {parsedPlayers.map((p, i) => (
+                      <div
+                        key={i}
+                        className={`text-xs px-2 py-0.5 rounded ${
+                          p.valid
+                            ? "text-emerald-400"
+                            : "text-red-400 bg-red-900/20"
+                        }`}
+                      >
+                        {p.displayMessage}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <p className="text-xs text-slate-500">
-                  Format: Name followed by rating (e.g., &quot;Alice 3.5&quot;)
+                  Format: Name followed by tier (e.g.{" "}
+                  <span className="font-mono text-slate-400">Alice A</span>
+                  ) or just a name for unrated.
+                  {unratedCount > 0 && (
+                    <span className="text-slate-400 ml-1">
+                      {unratedCount} player{unratedCount > 1 ? "s" : ""} unrated.
+                    </span>
+                  )}
                 </p>
+              </div>
+
+              {/* Check-In Mode */}
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-slate-300">
+                  Initial Check-In Mode
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCheckInMode("roster")}
+                    className={`py-3 px-4 rounded-xl text-sm font-medium transition-colors border text-left ${
+                      checkInMode === "roster"
+                        ? "bg-primary/20 border-primary text-primary"
+                        : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                    }`}
+                  >
+                    <div className="font-semibold">Roster</div>
+                    <div className="text-xs opacity-80 mt-0.5">
+                      Check in as players arrive
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCheckInMode("checked-in")}
+                    className={`py-3 px-4 rounded-xl text-sm font-medium transition-colors border text-left ${
+                      checkInMode === "checked-in"
+                        ? "bg-primary/20 border-primary text-primary"
+                        : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                    }`}
+                  >
+                    <div className="font-semibold">All Checked In</div>
+                    <div className="text-xs opacity-80 mt-0.5">
+                      Everyone starts waiting
+                    </div>
+                  </button>
+                </div>
               </div>
 
               <button
                 type="submit"
-                disabled={courtCount < 1 || !playerInput.trim()}
+                disabled={!canStart}
                 className={`w-full font-bold py-4 rounded-xl shadow-lg transition-all transform ${
-                  courtCount >= 1 && playerInput.trim()
+                  canStart
                     ? "bg-primary hover:bg-lime-400 text-primary-foreground shadow-primary/20 hover:shadow-primary/40 hover:-translate-y-0.5 active:translate-y-0"
                     : "bg-slate-800 text-slate-500 cursor-not-allowed"
                 }`}
               >
-                {showWarning ? "Start New Session" : "Start Session"}
+                {showWarning
+                  ? "Start New Session"
+                  : `Start Session (${validPlayers.length} players)`}
               </button>
             </form>
           </div>
