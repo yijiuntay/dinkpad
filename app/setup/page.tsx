@@ -2,11 +2,12 @@
 
 import React, { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Player, SessionState, Court } from "../types";
+import { Player, SessionState, Court, SessionMode } from "../types";
 import { saveSession, hasActiveSession } from "../utils/sessionStorage";
 
 export default function SetupPage() {
   const [courtCount, setCourtCount] = useState(4);
+  const [mode, setMode] = useState<SessionMode>("standard");
   const [playerInput, setPlayerInput] = useState("");
   const [dismissWarning, setDismissWarning] = useState(false);
   const [activeSessionExists, setActiveSessionExists] = useState(() =>
@@ -32,6 +33,24 @@ export default function SetupPage() {
     const players: Player[] = [];
 
     for (let i = 0; i < lines.length; i++) {
+      if (mode === "ladder") {
+        // Ladder mode: names only, no skill input. Everyone starts at equal rank.
+        const name = lines[i].trim();
+        if (name) {
+          players.push({
+            id: `player_${i + 1}`,
+            name,
+            skill: 0,
+            ladderRank: 0,
+            status: "waiting",
+            waitTime: 0,
+            gamesPlayed: 0,
+            consecutiveSkips: 0,
+          });
+        }
+        continue;
+      }
+
       const parts = lines[i].split(/\s+/);
       if (parts.length < 2) continue;
 
@@ -43,6 +62,7 @@ export default function SetupPage() {
           id: `player_${i + 1}`,
           name,
           skill,
+          ladderRank: 0,
           status: "waiting",
           waitTime: 0,
           gamesPlayed: 0,
@@ -71,7 +91,9 @@ export default function SetupPage() {
       players,
       courts,
       matchHistory: [],
-      currentStrategy: "balanced",
+      currentStrategy: mode === "ladder" ? "ladder" : "balanced",
+      mode,
+      lockedPairs: [],
       sessionStartTime: Date.now(),
       courtCount,
       nextPlayerId: players.length + 1,
@@ -150,6 +172,46 @@ export default function SetupPage() {
 
             <form className="space-y-6" onSubmit={handleStartSession}>
               <div className="space-y-2">
+                <label className="block text-sm font-medium text-slate-300">
+                  Session Mode
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMode("standard")}
+                    className={`p-3 rounded-xl border-2 text-left transition-colors ${
+                      mode === "standard"
+                        ? "bg-primary/20 border-primary"
+                        : "bg-slate-900/50 border-slate-700 hover:border-slate-600"
+                    }`}
+                  >
+                    <div className="font-bold text-slate-200 text-sm">
+                      ⚖️ Standard
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      Uses skill ratings
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode("ladder")}
+                    className={`p-3 rounded-xl border-2 text-left transition-colors ${
+                      mode === "ladder"
+                        ? "bg-primary/20 border-primary"
+                        : "bg-slate-900/50 border-slate-700 hover:border-slate-600"
+                    }`}
+                  >
+                    <div className="font-bold text-slate-200 text-sm">
+                      🪜 Ladder
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      No skills, results-driven
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
                 <label
                   htmlFor="courtCount"
                   className="block text-sm font-medium text-slate-300"
@@ -171,7 +233,7 @@ export default function SetupPage() {
                   htmlFor="players"
                   className="block text-sm font-medium text-slate-300"
                 >
-                  Players & Skill Ratings
+                  {mode === "ladder" ? "Players" : "Players & Skill Ratings"}
                 </label>
                 <div className="relative">
                   <textarea
@@ -179,9 +241,15 @@ export default function SetupPage() {
                     rows={8}
                     value={playerInput}
                     onChange={(e) => setPlayerInput(e.target.value)}
-                    placeholder={`Paste player list here...
+                    placeholder={
+                      mode === "ladder"
+                        ? `Paste player list here...
+John Doe
+Jane Smith`
+                        : `Paste player list here...
 John Doe 4.5
-Jane Smith 3.0`}
+Jane Smith 3.0`
+                    }
                     className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all resize-none font-mono text-sm"
                   />
                   <div className="absolute bottom-3 right-3 text-xs text-slate-500">
@@ -193,7 +261,9 @@ Jane Smith 3.0`}
                   </div>
                 </div>
                 <p className="text-xs text-slate-500">
-                  Format: Name followed by rating (e.g., &quot;Alice 3.5&quot;)
+                  {mode === "ladder"
+                    ? "One name per line. No skill ratings needed — everyone starts equal."
+                    : 'Format: Name followed by rating (e.g., "Alice 3.5")'}
                 </p>
               </div>
 

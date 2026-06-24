@@ -1,11 +1,14 @@
 export type PlayerStatus = "playing" | "waiting" | "paused";
 
-export type MatchmakingStrategy = "balanced" | "wait-time" | "variety";
+export type MatchmakingStrategy = "balanced" | "wait-time" | "variety" | "ladder";
+
+export type SessionMode = "standard" | "ladder";
 
 export interface Player {
   id: string;
   name: string;
   skill: number;
+  ladderRank: number; // ladder points; win +1, loss -1. Unused in standard mode.
   status: PlayerStatus;
   waitTime: number; // in seconds
   gamesPlayed: number;
@@ -26,6 +29,7 @@ export interface Match {
   teamB: Team;
   startTime: number;
   strategy: MatchmakingStrategy;
+  winner?: "A" | "B"; // set on End Game in ladder mode
 }
 
 export interface PairingRecord {
@@ -41,6 +45,8 @@ export interface MatchHistory {
   players: string[]; // player IDs
   pairings: PairingRecord[];
   timestamp: number;
+  winners?: string[]; // player IDs of winning team (ladder mode)
+  losers?: string[]; // player IDs of losing team (ladder mode)
 }
 
 export interface Court {
@@ -54,6 +60,8 @@ export interface SessionState {
   courts: Court[];
   matchHistory: MatchHistory[];
   currentStrategy: MatchmakingStrategy;
+  mode: SessionMode;
+  lockedPairs: [string, string][]; // pairs the host marked "keep together" awaiting their next match
   sessionStartTime: number;
   courtCount: number;
   nextPlayerId: number;

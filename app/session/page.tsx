@@ -8,7 +8,28 @@ import {
   saveSession,
   clearSession,
 } from "../utils/sessionStorage";
-import { generateMatch, recordMatch } from "../utils/matchmaking";
+import {
+  generateMatch,
+  recordMatch,
+  applyLadderResult,
+  medianLadderRank,
+} from "../utils/matchmaking";
+
+// Remove any locked pair whose two members were placed together as partners in this match.
+function consumeLockedPairs(
+  lockedPairs: [string, string][],
+  match: Match,
+): [string, string][] {
+  const teams = [
+    [match.teamA.partner1.id, match.teamA.partner2.id],
+    [match.teamB.partner1.id, match.teamB.partner2.id],
+  ];
+  const arePartners = (a: string, b: string) =>
+    teams.some(
+      ([t1, t2]) => (t1 === a && t2 === b) || (t1 === b && t2 === a),
+    );
+  return lockedPairs.filter(([a, b]) => !arePartners(a, b));
+}
 
 export default function SessionPage() {
   const [session, setSession] = useState<SessionState | null>(null);
@@ -18,7 +39,14 @@ export default function SessionPage() {
   const [newPlayerName, setNewPlayerName] = useState("");
   const [newPlayerSkill, setNewPlayerSkill] = useState("");
   const [currentTime, setCurrentTime] = useState(() => Date.now());
+  // Ladder end-game dialog state
+  const [endingCourt, setEndingCourt] = useState<number | null>(null);
+  const [keepTogetherA, setKeepTogetherA] = useState(false);
+  const [keepTogetherB, setKeepTogetherB] = useState(false);
+  const [showStandings, setShowStandings] = useState(false);
   const router = useRouter();
+
+  const isLadder = session?.mode === "ladder";
 
   // Load session on mount
   useEffect(() => {
@@ -85,6 +113,7 @@ export default function SessionPage() {
       session.matchHistory,
       matchId,
       session.courtCount,
+      session.lockedPairs,
     );
 
     if (!match) {
@@ -129,19 +158,36 @@ export default function SessionPage() {
       ...session,
       players: updatedPlayers,
       courts: updatedCourts,
+      lockedPairs: consumeLockedPairs(session.lockedPairs, match),
       nextMatchId: session.nextMatchId + 1,
     });
   };
 
+  // Standard mode: end immediately (no result captured).
+  // Ladder mode: open the winner-selection dialog instead.
   const endMatch = (courtNumber: number) => {
+    if (!session) return;
+
+    if (session.mode === "ladder") {
+      setKeepTogetherA(false);
+      setKeepTogetherB(false);
+      setEndingCourt(courtNumber);
+      return;
+    }
+
+    finalizeMatch(courtNumber);
+  };
+
+  // Apply the end of a match. `winner` is provided in ladder mode.
+  const finalizeMatch = (courtNumber: number, winner?: "A" | "B") => {
     if (!session) return;
 
     const court = session.courts.find((c) => c.number === courtNumber);
     if (!court?.currentMatch) return;
 
-    const match = court.currentMatch;
+    const match = { ...court.currentMatch, winner };
 
-    // Record match history
+    // Record match history (stamps winners/losers when a winner is set)
     const history = recordMatch(match);
 
     // Update player statuses and game counts
@@ -152,7 +198,7 @@ export default function SessionPage() {
       match.teamB.partner2.id,
     ];
 
-    const updatedPlayers = session.players.map((p) => {
+    let updatedPlayers = session.players.map((p) => {
       if (playingPlayerIds.includes(p.id)) {
         return {
           ...p,
@@ -163,6 +209,26 @@ export default function SessionPage() {
       return p;
     });
 
+    // Apply ladder rank changes
+    if (winner) {
+      updatedPlayers = applyLadderResult(updatedPlayers, match, winner);
+    }
+
+    // Carry over any "keep together" requests as locked pairs for the next round
+    let updatedLockedPairs = session.lockedPairs;
+    if (keepTogetherA) {
+      updatedLockedPairs = [
+        ...updatedLockedPairs,
+        [match.teamA.partner1.id, match.teamA.partner2.id],
+      ];
+    }
+    if (keepTogetherB) {
+      updatedLockedPairs = [
+        ...updatedLockedPairs,
+        [match.teamB.partner1.id, match.teamB.partner2.id],
+      ];
+    }
+
     // Clear court
     const updatedCourts = session.courts.map((c) =>
       c.number === courtNumber ? { ...c, currentMatch: null } : c,
@@ -172,8 +238,13 @@ export default function SessionPage() {
       ...session,
       players: updatedPlayers,
       courts: updatedCourts,
+      lockedPairs: updatedLockedPairs,
       matchHistory: [...session.matchHistory, history],
     });
+
+    setEndingCourt(null);
+    setKeepTogetherA(false);
+    setKeepTogetherB(false);
   };
 
   const togglePlayerStatus = (playerId: string) => {
@@ -212,18 +283,28 @@ export default function SessionPage() {
   };
 
   const addPlayer = () => {
-    if (!session || !newPlayerName.trim() || !newPlayerSkill.trim()) return;
+    if (!session || !newPlayerName.trim()) return;
 
-    const skill = parseFloat(newPlayerSkill);
-    if (isNaN(skill) || skill < 1 || skill > 5.5) {
-      alert("Please enter a valid skill rating between 1.0 and 5.5");
-      return;
+    let skill = 0;
+    let ladderRank = 0;
+
+    if (session.mode === "ladder") {
+      // New joiners enter at the median rank so they integrate fairly
+      ladderRank = medianLadderRank(session.players);
+    } else {
+      if (!newPlayerSkill.trim()) return;
+      skill = parseFloat(newPlayerSkill);
+      if (isNaN(skill) || skill < 1 || skill > 5.5) {
+        alert("Please enter a valid skill rating between 1.0 and 5.5");
+        return;
+      }
     }
 
     const newPlayer: Player = {
       id: `player_${session.nextPlayerId}`,
       name: newPlayerName.trim(),
       skill,
+      ladderRank,
       status: "waiting",
       waitTime: 0,
       gamesPlayed: 0,
@@ -263,6 +344,7 @@ export default function SessionPage() {
     // Work with local copies to avoid state race conditions
     let updatedPlayers = [...session.players];
     let updatedCourts = [...session.courts];
+    let updatedLockedPairs = [...session.lockedPairs];
     let nextMatchId = session.nextMatchId;
 
     // Process each empty court sequentially
@@ -278,6 +360,7 @@ export default function SessionPage() {
           session.matchHistory,
           matchId,
           session.courtCount,
+          updatedLockedPairs,
         );
 
         if (match) {
@@ -314,6 +397,9 @@ export default function SessionPage() {
             c.number === court.number ? { ...c, currentMatch: match } : c,
           );
 
+          // Consume any locked pairs honored by this match
+          updatedLockedPairs = consumeLockedPairs(updatedLockedPairs, match);
+
           nextMatchId++;
         }
       }
@@ -324,6 +410,7 @@ export default function SessionPage() {
       ...session,
       players: updatedPlayers,
       courts: updatedCourts,
+      lockedPairs: updatedLockedPairs,
       nextMatchId: nextMatchId,
     });
   };
@@ -344,7 +431,31 @@ export default function SessionPage() {
     balanced: "⚖️ Balanced",
     "wait-time": "⏱️ Wait Time",
     variety: "🔄 Variety",
+    ladder: "🪜 Ladder",
   };
+
+  // Win/loss tally per player from match history (ladder mode)
+  const ladderStats = new Map<string, { wins: number; losses: number }>();
+  if (isLadder) {
+    for (const h of session.matchHistory) {
+      for (const id of h.winners ?? []) {
+        const s = ladderStats.get(id) ?? { wins: 0, losses: 0 };
+        s.wins += 1;
+        ladderStats.set(id, s);
+      }
+      for (const id of h.losers ?? []) {
+        const s = ladderStats.get(id) ?? { wins: 0, losses: 0 };
+        s.losses += 1;
+        ladderStats.set(id, s);
+      }
+    }
+  }
+
+  const standings = isLadder
+    ? [...session.players].sort(
+        (a, b) => b.ladderRank - a.ladderRank || b.gamesPlayed - a.gamesPlayed,
+      )
+    : [];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-950 pb-24">
@@ -370,27 +481,38 @@ export default function SessionPage() {
                 {session.players.length} Players
               </span>
             </div>
-            <button
-              onClick={() => setShowStrategyModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-            >
-              <span className="text-slate-300 text-xs font-medium">
-                {strategyLabels[session.currentStrategy]}
-              </span>
-              <svg
-                className="w-4 h-4 text-slate-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+            {isLadder ? (
+              <button
+                onClick={() => setShowStandings(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                  d="M19 9l-7 7-7-7"
-                />
-              </svg>
-            </button>
+                <span className="text-slate-300 text-xs font-medium">
+                  🪜 Standings
+                </span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowStrategyModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                <span className="text-slate-300 text-xs font-medium">
+                  {strategyLabels[session.currentStrategy]}
+                </span>
+                <svg
+                  className="w-4 h-4 text-slate-400"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M19 9l-7 7-7-7"
+                  />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -412,6 +534,11 @@ export default function SessionPage() {
             <span className="w-2 h-2 rounded-full bg-green-500"></span>
             PLAYING ({playingPlayers.length})
           </h2>
+          {isLadder && (
+            <p className="text-xs text-slate-500">
+              Court 1 is the top of the ladder. Winners climb, losers drop.
+            </p>
+          )}
 
           {session.courts
             .filter((c) => c.isActive)
@@ -459,7 +586,13 @@ export default function SessionPage() {
                           {court.currentMatch.teamA.partner2.name}
                         </div>
                         <div className="text-xs text-slate-400 mt-1">
-                          Avg: {court.currentMatch.teamA.avgSkill.toFixed(1)}
+                          {isLadder
+                            ? `Avg rank: ${(
+                                (court.currentMatch.teamA.partner1.ladderRank +
+                                  court.currentMatch.teamA.partner2.ladderRank) /
+                                2
+                              ).toFixed(1)}`
+                            : `Avg: ${court.currentMatch.teamA.avgSkill.toFixed(1)}`}
                         </div>
                       </div>
 
@@ -478,7 +611,13 @@ export default function SessionPage() {
                           {court.currentMatch.teamB.partner2.name}
                         </div>
                         <div className="text-xs text-slate-400 mt-1">
-                          Avg: {court.currentMatch.teamB.avgSkill.toFixed(1)}
+                          {isLadder
+                            ? `Avg rank: ${(
+                                (court.currentMatch.teamB.partner1.ladderRank +
+                                  court.currentMatch.teamB.partner2.ladderRank) /
+                                2
+                              ).toFixed(1)}`
+                            : `Avg: ${court.currentMatch.teamB.avgSkill.toFixed(1)}`}
                         </div>
                       </div>
                     </div>
@@ -561,7 +700,11 @@ export default function SessionPage() {
                           )}
                         </div>
                         <div className="text-xs text-slate-400 flex items-center gap-3 mt-1">
-                          <span>Skill: {player.skill}</span>
+                          <span>
+                            {isLadder
+                              ? `Rank: ${player.ladderRank}`
+                              : `Skill: ${player.skill}`}
+                          </span>
                           <span>•</span>
                           <span className="flex items-center gap-1">
                             <svg
@@ -647,7 +790,10 @@ export default function SessionPage() {
                       {player.name}
                     </div>
                     <div className="text-xs text-slate-400">
-                      Skill: {player.skill} • Games: {player.gamesPlayed}
+                      {isLadder
+                        ? `Rank: ${player.ladderRank}`
+                        : `Skill: ${player.skill}`}{" "}
+                      • Games: {player.gamesPlayed}
                     </div>
                   </div>
                   <button
@@ -768,8 +914,10 @@ export default function SessionPage() {
               {selectedPlayer.name}
             </h3>
             <p className="text-slate-400 text-sm mb-6">
-              Skill: {selectedPlayer.skill} • Games:{" "}
-              {selectedPlayer.gamesPlayed}
+              {isLadder
+                ? `Rank: ${selectedPlayer.ladderRank}`
+                : `Skill: ${selectedPlayer.skill}`}{" "}
+              • Games: {selectedPlayer.gamesPlayed}
             </p>
             <div className="space-y-2">
               <button
@@ -824,21 +972,27 @@ export default function SessionPage() {
                   autoFocus
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Skill Rating (1.0 - 5.5)
-                </label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="1"
-                  max="5.5"
-                  value={newPlayerSkill}
-                  onChange={(e) => setNewPlayerSkill(e.target.value)}
-                  placeholder="3.5"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
-                />
-              </div>
+              {isLadder ? (
+                <p className="text-xs text-slate-500">
+                  New players join the ladder at the current median rank.
+                </p>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Skill Rating (1.0 - 5.5)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="1"
+                    max="5.5"
+                    value={newPlayerSkill}
+                    onChange={(e) => setNewPlayerSkill(e.target.value)}
+                    placeholder="3.5"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
+                  />
+                </div>
+              )}
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => setShowAddPlayerModal(false)}
@@ -848,9 +1002,12 @@ export default function SessionPage() {
                 </button>
                 <button
                   onClick={addPlayer}
-                  disabled={!newPlayerName.trim() || !newPlayerSkill.trim()}
+                  disabled={
+                    !newPlayerName.trim() ||
+                    (!isLadder && !newPlayerSkill.trim())
+                  }
                   className={`flex-1 py-3 rounded-xl font-medium transition-colors ${
-                    newPlayerName.trim() && newPlayerSkill.trim()
+                    newPlayerName.trim() && (isLadder || newPlayerSkill.trim())
                       ? "bg-primary hover:bg-lime-400 text-primary-foreground"
                       : "bg-slate-800 text-slate-500 cursor-not-allowed"
                   }`}
@@ -859,6 +1016,144 @@ export default function SessionPage() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ladder End Game / Winner Modal */}
+      {endingCourt !== null &&
+        (() => {
+          const match = session.courts.find(
+            (c) => c.number === endingCourt,
+          )?.currentMatch;
+          if (!match) return null;
+          return (
+            <div
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4"
+              onClick={() => setEndingCourt(null)}
+            >
+              <div
+                className="bg-slate-900 rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 border border-slate-700 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 className="text-xl font-bold text-slate-200 mb-1">
+                  Court {endingCourt}: Who won?
+                </h3>
+                <p className="text-slate-400 text-sm mb-4">
+                  Winners move up the ladder, losers move down.
+                </p>
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <button
+                    onClick={() => finalizeMatch(endingCourt, "A")}
+                    className="p-4 rounded-xl bg-slate-800 hover:bg-primary/20 border-2 border-transparent hover:border-primary text-left transition-colors"
+                  >
+                    <div className="text-xs text-slate-500 mb-1">
+                      Team A won
+                    </div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {match.teamA.partner1.name}
+                    </div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {match.teamA.partner2.name}
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => finalizeMatch(endingCourt, "B")}
+                    className="p-4 rounded-xl bg-slate-800 hover:bg-primary/20 border-2 border-transparent hover:border-primary text-left transition-colors"
+                  >
+                    <div className="text-xs text-slate-500 mb-1">
+                      Team B won
+                    </div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {match.teamB.partner1.name}
+                    </div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {match.teamB.partner2.name}
+                    </div>
+                  </button>
+                </div>
+                <div className="space-y-2 mb-4">
+                  <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={keepTogetherA}
+                      onChange={(e) => setKeepTogetherA(e.target.checked)}
+                      className="accent-primary w-4 h-4"
+                    />
+                    Keep Team A together next round
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={keepTogetherB}
+                      onChange={(e) => setKeepTogetherB(e.target.checked)}
+                      className="accent-primary w-4 h-4"
+                    />
+                    Keep Team B together next round
+                  </label>
+                </div>
+                <button
+                  onClick={() => setEndingCourt(null)}
+                  className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-xl font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+
+      {/* Ladder Standings Modal */}
+      {showStandings && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4"
+          onClick={() => setShowStandings(false)}
+        >
+          <div
+            className="bg-slate-900 rounded-t-3xl sm:rounded-3xl w-full max-w-md p-6 border border-slate-700 shadow-2xl max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold text-slate-200 mb-4">
+              🪜 Ladder Standings
+            </h3>
+            <div className="space-y-1.5 overflow-y-auto">
+              {standings.map((player, i) => {
+                const stats = ladderStats.get(player.id) ?? {
+                  wins: 0,
+                  losses: 0,
+                };
+                return (
+                  <div
+                    key={player.id}
+                    className="flex items-center justify-between bg-slate-800/50 rounded-lg px-3 py-2"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-sm w-6 text-right">
+                        {i + 1}
+                      </span>
+                      <span className="font-medium text-slate-200">
+                        {player.name}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-400 flex items-center gap-3">
+                      <span className="text-primary font-medium">
+                        {player.ladderRank > 0 ? "+" : ""}
+                        {player.ladderRank}
+                      </span>
+                      <span>
+                        {stats.wins}W-{stats.losses}L
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => setShowStandings(false)}
+              className="w-full mt-4 py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-xl font-medium transition-colors"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}

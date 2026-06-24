@@ -20,15 +20,18 @@ export function loadSession(): SessionState | null {
 
     const session = JSON.parse(saved) as SessionState;
 
-    // Migrate old sessions: add consecutiveSkips if missing
+    // Migrate old sessions: add fields that may be missing
     const migratedPlayers = session.players.map((player) => ({
       ...player,
       consecutiveSkips: player.consecutiveSkips ?? 0,
+      ladderRank: player.ladderRank ?? 0,
     }));
 
     return {
       ...session,
       players: migratedPlayers,
+      mode: session.mode ?? "standard",
+      lockedPairs: session.lockedPairs ?? [],
     };
   } catch (error) {
     console.error("Failed to load session:", error);

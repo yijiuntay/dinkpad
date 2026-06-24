@@ -275,6 +275,88 @@ function matchVariety(
   return bestMatch;
 }
 
+// Helper to form ladder teams from a chosen group of 4.
+// A locked pair (placed first by the caller) is kept together; otherwise we pick
+// the pairing that splits prior partners (minimizes recent repeat partnerships).
+function formLadderTeams(
+  four: Player[],
+  history: MatchHistory[],
+  hasLockedPair: boolean,
+): Player[] {
+  const [a, b, c, d] = four;
+
+  if (hasLockedPair) {
+    // a,b are the locked pair; keep them together
+    return [a, b, c, d];
+  }
+
+  const pairings: [Player, Player, Player, Player][] = [
+    [a, b, c, d],
+    [a, c, b, d],
+    [a, d, b, c],
+  ];
+
+  let best = pairings[0];
+  let bestScore = Infinity;
+  for (const [p1, p2, p3, p4] of pairings) {
+    const score =
+      getPairingCount(history, p1.id, p2.id, "partners") +
+      getPairingCount(history, p3.id, p4.id, "partners");
+    if (score < bestScore) {
+      bestScore = score;
+      best = [p1, p2, p3, p4];
+    }
+  }
+  return best;
+}
+
+// Strategy 4: Ladder (results-driven; no skill input)
+// Groups players of adjacent ladderRank, honoring "keep together" locked pairs,
+// and splits prior partners by default.
+function matchLadder(
+  availablePlayers: Player[],
+  history: MatchHistory[],
+  lockedPairs: [string, string][],
+): Player[] | null {
+  if (availablePlayers.length < 4) return null;
+
+  const byId = new Map(availablePlayers.map((p) => [p.id, p]));
+
+  // Sort by ladderRank desc, tiebreak by longer wait time
+  const rankSort = (a: Player, b: Player) =>
+    b.ladderRank - a.ladderRank || b.waitTime - a.waitTime;
+
+  // 1. Honor the first locked pair that is fully available
+  let lockedPair: [Player, Player] | null = null;
+  for (const [id1, id2] of lockedPairs) {
+    const p1 = byId.get(id1);
+    const p2 = byId.get(id2);
+    if (p1 && p2) {
+      lockedPair = [p1, p2];
+      break;
+    }
+  }
+
+  let chosen: Player[];
+  if (lockedPair) {
+    // Seed the match around the locked pair's rank with the 2 nearest-rank others
+    const [lp1, lp2] = lockedPair;
+    const anchor = (lp1.ladderRank + lp2.ladderRank) / 2;
+    const others = availablePlayers
+      .filter((p) => p.id !== lp1.id && p.id !== lp2.id)
+      .sort(
+        (a, b) =>
+          Math.abs(a.ladderRank - anchor) - Math.abs(b.ladderRank - anchor) ||
+          b.waitTime - a.waitTime,
+      );
+    chosen = [lp1, lp2, others[0], others[1]];
+  } else {
+    chosen = [...availablePlayers].sort(rankSort).slice(0, 4);
+  }
+
+  return formLadderTeams(chosen, history, lockedPair !== null);
+}
+
 // Main matchmaking function
 export function generateMatch(
   courtNumber: number,
@@ -283,6 +365,7 @@ export function generateMatch(
   history: MatchHistory[],
   matchId: string,
   courtCount: number,
+  lockedPairs: [string, string][] = [],
 ): Match | null {
   // Get available players (waiting or paused with low wait time)
   const availablePlayers = players.filter((p) => p.status === "waiting");
@@ -300,14 +383,18 @@ export function generateMatch(
 
   let selectedPlayers: Player[] | null = null;
 
+  // Ordering for balanced teams: by ladderRank in ladder mode, otherwise by skill
+  const teamSort = (a: Player, b: Player) =>
+    strategy === "ladder" ? b.ladderRank - a.ladderRank : b.skill - a.skill;
+
   // Priority 1: If we have 4+ critical players, take top 4 by wait time
   if (critical.length >= 4) {
     const sortedCritical = [...critical].sort(
       (a, b) => b.waitTime - a.waitTime,
     );
     const selected = sortedCritical.slice(0, 4);
-    // Sort by skill to create balanced teams
-    selected.sort((a, b) => b.skill - a.skill);
+    // Order to create balanced teams (high+low vs mid)
+    selected.sort(teamSort);
     selectedPlayers = [selected[0], selected[3], selected[1], selected[2]];
   }
   // Priority 2: If we have 1-3 critical players, include them + fill from normal pool
@@ -331,6 +418,9 @@ export function generateMatch(
       case "variety":
         remainingPlayers = matchVariety(normal, history);
         break;
+      case "ladder":
+        remainingPlayers = matchLadder(normal, history, lockedPairs);
+        break;
     }
 
     if (remainingPlayers && remainingPlayers.length >= neededCount) {
@@ -339,8 +429,8 @@ export function generateMatch(
         ...sortedCritical,
         ...remainingPlayers.slice(0, neededCount),
       ];
-      // Sort by skill to create balanced teams
-      combined.sort((a, b) => b.skill - a.skill);
+      // Order to create balanced teams
+      combined.sort(teamSort);
       selectedPlayers = [combined[0], combined[3], combined[1], combined[2]];
     } else {
       // Fallback: sort all available by wait time if strategy fails
@@ -349,7 +439,7 @@ export function generateMatch(
       );
       if (allSorted.length >= 4) {
         const selected = allSorted.slice(0, 4);
-        selected.sort((a, b) => b.skill - a.skill);
+        selected.sort(teamSort);
         selectedPlayers = [selected[0], selected[3], selected[1], selected[2]];
       }
     }
@@ -365,6 +455,9 @@ export function generateMatch(
         break;
       case "variety":
         selectedPlayers = matchVariety(availablePlayers, history);
+        break;
+      case "ladder":
+        selectedPlayers = matchLadder(availablePlayers, history, lockedPairs);
         break;
     }
   }
@@ -451,10 +544,53 @@ export function recordMatch(match: Match): MatchHistory {
     },
   ];
 
+  let winners: string[] | undefined;
+  let losers: string[] | undefined;
+  if (match.winner) {
+    const teamAIds = [match.teamA.partner1.id, match.teamA.partner2.id];
+    const teamBIds = [match.teamB.partner1.id, match.teamB.partner2.id];
+    winners = match.winner === "A" ? teamAIds : teamBIds;
+    losers = match.winner === "A" ? teamBIds : teamAIds;
+  }
+
   return {
     matchId: match.id,
     players: playerIds,
     pairings,
     timestamp: match.startTime,
+    winners,
+    losers,
   };
+}
+
+// Apply a ladder result: winners +1 rank, losers -1 rank, others unchanged.
+export function applyLadderResult(
+  players: Player[],
+  match: Match,
+  winner: "A" | "B",
+): Player[] {
+  const teamAIds = [match.teamA.partner1.id, match.teamA.partner2.id];
+  const teamBIds = [match.teamB.partner1.id, match.teamB.partner2.id];
+  const winnerIds = winner === "A" ? teamAIds : teamBIds;
+  const loserIds = winner === "A" ? teamBIds : teamAIds;
+
+  return players.map((p) => {
+    if (winnerIds.includes(p.id)) {
+      return { ...p, ladderRank: p.ladderRank + 1 };
+    }
+    if (loserIds.includes(p.id)) {
+      return { ...p, ladderRank: p.ladderRank - 1 };
+    }
+    return p;
+  });
+}
+
+// Median ladderRank of a set of players (for fairly seeding mid-session joiners).
+export function medianLadderRank(players: Player[]): number {
+  if (players.length === 0) return 0;
+  const sorted = players.map((p) => p.ladderRank).sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0
+    ? sorted[mid]
+    : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }

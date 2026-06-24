@@ -17,6 +17,7 @@ function loadPlayers(): Player[] {
             id: `p${index + 1}`,
             name,
             skill: isNaN(skill) ? 3.0 : skill,
+            ladderRank: 0,
             status: 'waiting',
             waitTime: 0,
             gamesPlayed: 0,
